@@ -3,14 +3,13 @@ import axios from 'axios';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { promises as fs } from 'fs'; // Impor ini tetap benar
-import { Indexer, ZgFile } from '@0glabs/0g-ts-sdk';
+import { promises as fs } from 'fs';
 import dotenv from 'dotenv';
 
 // --- Inisialisasi Awal ---
 dotenv.config();
 
-// Logger (tidak berubah)
+// Logger
 const colors = {
   reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m",
   yellow: "\x1b[33m", red: "\x1b[31m", white: "\x1b[37m",
@@ -23,22 +22,17 @@ const logger = {
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Full-Automatic Uploader (v4) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Manual Fallback v5) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
 const {
-    PRIVATE_KEY,
-    RPC_URL,
-    INDEXER_URL,
-    UPLOADS_TO_RUN,
-    DELAY_MS,
-    EXPLORER_URL
+    PRIVATE_KEY, RPC_URL, INDEXER_URL, CONTRACT_ADDRESS,
+    UPLOADS_TO_RUN, DELAY_MS, EXPLORER_URL
 } = process.env;
 
-// Validasi konfigurasi
-if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL) {
-    logger.critical("Pastikan PRIVATE_KEY, RPC_URL, dan INDEXER_URL ada di file .env");
+if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS) {
+    logger.critical("Pastikan semua variabel (termasuk CONTRACT_ADDRESS) ada di file .env");
     process.exit(1);
 }
 
@@ -48,47 +42,25 @@ const delayMilliseconds = parseInt(DELAY_MS, 10) || 5000;
 // --- Setup Provider & Wallet ---
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-const indexer = new Indexer(INDEXER_URL);
 
-// Mendefinisikan path direktori
+// Membuat direktori untuk file sementara
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const GENERATED_DIR = path.join(__dirname, 'generated-files');
 
 // --- Fungsi-fungsi Utama ---
 
-/**
- * **FUNGSI BARU:** Memastikan direktori ada, jika tidak ada maka akan dibuat.
- * Ini adalah pengganti asynchronous untuk fs.existsSync.
- */
 async function ensureDirectoryExists(dirPath) {
-    try {
-        await fs.access(dirPath);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            logger.loading(`Directory ${dirPath} not found, creating...`);
-            await fs.mkdir(dirPath);
-        } else {
-            throw error;
-        }
+    try { await fs.access(dirPath); } catch (error) {
+        if (error.code === 'ENOENT') { await fs.mkdir(dirPath); } else { throw error; }
     }
-}
-
-function createAxiosInstance() {
-    return axios.create({
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        }
-    });
 }
 
 async function fetchRandomImage() {
     logger.loading('Fetching random image...');
     try {
-        const axiosInstance = createAxiosInstance();
-        const response = await axiosInstance.get('https://picsum.photos/800/600', {
-            responseType: 'arraybuffer',
-            maxRedirects: 5
+        const response = await axios.get('https://picsum.photos/800/600', {
+            responseType: 'arraybuffer', maxRedirects: 5
         });
         logger.info('Image fetched successfully.');
         return response.data;
@@ -98,14 +70,35 @@ async function fetchRandomImage() {
     }
 }
 
-async function uploadFileWithSDK(filePath) {
-    logger.loading(`Uploading file from path: ${filePath}`);
-    const file = new ZgFile(filePath);
-    const [tx, err] = await indexer.upload(file, RPC_URL, wallet);
+/**
+ * Upload file menggunakan metode manual (axios + ethers)
+ */
+async function uploadFileManually(imageBuffer) {
+    logger.loading('Preparing file for manual upload...');
+    const root = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
+    const size = imageBuffer.length;
 
-    if (err) {
-        throw new Error(`SDK returned an error: ${err.message || err}`);
-    }
+    // 1. Upload file ke storage node via indexer (axios)
+    logger.loading(`Uploading file segment for root ${root}...`);
+    await axios.post(`${INDEXER_URL}/file/segment`, {
+        root: root,
+        index: 0,
+        data: Buffer.from(imageBuffer).toString('base64'),
+        proof: { siblings: [root], path: [] }
+    }, { headers: { 'content-type': 'application/json' } });
+    logger.info('File segment uploaded to indexer.');
+
+    // 2. Kirim transaksi ke smart contract (ethers)
+    const iface = new ethers.Interface([`function store(bytes32 _root, uint64 _dataSize)`]);
+    const data = iface.encodeFunctionData("store", [root, BigInt(size)]);
+    
+    logger.loading('Estimating gas and sending transaction...');
+    const tx = await wallet.sendTransaction({
+        to: CONTRACT_ADDRESS,
+        data: data,
+        // Anda bisa menambahkan value jika diperlukan, tapi seringkali gas saja cukup
+        // value: ethers.parseEther('0.00084') 
+    });
 
     const txLink = `${EXPLORER_URL}${tx.hash}`;
     logger.info(`Transaction sent: ${tx.hash}`);
@@ -119,18 +112,14 @@ async function uploadFileWithSDK(filePath) {
     }
 
     logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
-    logger.info(`File uploaded successfully! Root hash: ${file.root}`);
+    logger.info(`File uploaded successfully! Root hash: ${root}`);
     return receipt;
 }
-
 
 async function main() {
     logger.banner();
     try {
-        // **PERUBAHAN:** Memanggil fungsi baru untuk mengecek/membuat direktori
         await ensureDirectoryExists(GENERATED_DIR);
-
-        // Cek koneksi dan saldo wallet
         logger.loading(`Checking connection to ${RPC_URL}...`);
         const network = await provider.getNetwork();
         logger.info(`Connected to network: chainId ${network.chainId}`);
@@ -145,30 +134,14 @@ async function main() {
 
         for (let i = 1; i <= uploadsCount; i++) {
             logger.process(`Upload ${i}/${uploadsCount}`);
-            let tempFilePath = '';
             try {
                 const imageBuffer = await fetchRandomImage();
-                const tempFileName = `${crypto.randomBytes(16).toString('hex')}.jpg`;
-                tempFilePath = path.join(GENERATED_DIR, tempFileName);
-
-                await fs.writeFile(tempFilePath, imageBuffer);
-                await uploadFileWithSDK(tempFilePath);
-                
+                await uploadFileManually(imageBuffer); // Memanggil fungsi manual
                 successful++;
                 logger.info(`Upload ${i} completed successfully.`);
-
             } catch (error) {
                 failed++;
-                logger.error(`Upload ${i} failed: ${error.message}`);
-            } finally {
-                if (tempFilePath) {
-                    try {
-                        await fs.unlink(tempFilePath);
-                        logger.info(`Temporary file ${tempFilePath} deleted.`);
-                    } catch (cleanupError) {
-                        logger.warn(`Failed to delete temporary file: ${cleanupError.message}`);
-                    }
-                }
+                logger.error(`Upload ${i} failed: ${error.response ? JSON.stringify(error.response.data) : error.message}`);
             }
 
             if (i < uploadsCount) {
