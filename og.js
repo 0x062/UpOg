@@ -3,7 +3,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { promises as fs } from 'fs'; // Menggunakan fs/promises untuk operasi file
+import { promises as fs } from 'fs'; // Impor ini tetap benar
 import { Indexer, ZgFile } from '@0glabs/0g-ts-sdk';
 import dotenv from 'dotenv';
 
@@ -23,7 +23,7 @@ const logger = {
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Full-Automatic Uploader (v3) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Full-Automatic Uploader (v4) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
@@ -50,15 +50,29 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const indexer = new Indexer(INDEXER_URL);
 
-// Membuat direktori untuk file sementara jika belum ada
+// Mendefinisikan path direktori
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const GENERATED_DIR = path.join(__dirname, 'generated-files');
-if (!fs.existsSync(GENERATED_DIR)) {
-    fs.mkdirSync(GENERATED_DIR);
-}
 
 // --- Fungsi-fungsi Utama ---
+
+/**
+ * **FUNGSI BARU:** Memastikan direktori ada, jika tidak ada maka akan dibuat.
+ * Ini adalah pengganti asynchronous untuk fs.existsSync.
+ */
+async function ensureDirectoryExists(dirPath) {
+    try {
+        await fs.access(dirPath);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            logger.loading(`Directory ${dirPath} not found, creating...`);
+            await fs.mkdir(dirPath);
+        } else {
+            throw error;
+        }
+    }
+}
 
 function createAxiosInstance() {
     return axios.create({
@@ -84,24 +98,15 @@ async function fetchRandomImage() {
     }
 }
 
-/**
- * Fungsi ini sekarang menerima FILE PATH, bukan buffer.
- */
 async function uploadFileWithSDK(filePath) {
     logger.loading(`Uploading file from path: ${filePath}`);
-
-    // 1. Buat instance ZgFile dari file path. Ini adalah perubahan kunci.
     const file = new ZgFile(filePath);
-
-    // 2. Panggil fungsi `upload` SESUAI DOKUMENTASI
     const [tx, err] = await indexer.upload(file, RPC_URL, wallet);
 
-    // 3. Cek jika ada error
     if (err) {
         throw new Error(`SDK returned an error: ${err.message || err}`);
     }
 
-    // 4. Proses transaksi
     const txLink = `${EXPLORER_URL}${tx.hash}`;
     logger.info(`Transaction sent: ${tx.hash}`);
     logger.info(`Explorer: ${txLink}`);
@@ -122,6 +127,9 @@ async function uploadFileWithSDK(filePath) {
 async function main() {
     logger.banner();
     try {
+        // **PERUBAHAN:** Memanggil fungsi baru untuk mengecek/membuat direktori
+        await ensureDirectoryExists(GENERATED_DIR);
+
         // Cek koneksi dan saldo wallet
         logger.loading(`Checking connection to ${RPC_URL}...`);
         const network = await provider.getNetwork();
@@ -139,16 +147,11 @@ async function main() {
             logger.process(`Upload ${i}/${uploadsCount}`);
             let tempFilePath = '';
             try {
-                // Buat nama file sementara yang unik
                 const imageBuffer = await fetchRandomImage();
                 const tempFileName = `${crypto.randomBytes(16).toString('hex')}.jpg`;
                 tempFilePath = path.join(GENERATED_DIR, tempFileName);
 
-                // Tulis buffer ke file sementara
-                logger.loading(`Saving to temporary file: ${tempFilePath}`);
                 await fs.writeFile(tempFilePath, imageBuffer);
-
-                // Kirim path file ke fungsi upload
                 await uploadFileWithSDK(tempFilePath);
                 
                 successful++;
@@ -158,7 +161,6 @@ async function main() {
                 failed++;
                 logger.error(`Upload ${i} failed: ${error.message}`);
             } finally {
-                // Pastikan untuk selalu menghapus file sementara
                 if (tempFilePath) {
                     try {
                         await fs.unlink(tempFilePath);
