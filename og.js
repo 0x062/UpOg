@@ -22,40 +22,28 @@ const logger = {
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Final Version) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Final Working Version) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
 const {
     PRIVATE_KEY, RPC_URL, INDEXER_URL, CONTRACT_ADDRESS,
-    UPLOADS_TO_RUN, DELAY_MS, EXPLORER_URL, STORAGE_FEE_IN_ETHER
+    UPLOADS_TO_RUN, DELAY_MS, EXPLORER_URL
 } = process.env;
 
-if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS || !STORAGE_FEE_IN_ETHER) {
-    logger.critical("Pastikan semua variabel (termasuk CONTRACT_ADDRESS & STORAGE_FEE_IN_ETHER) ada di file .env");
+if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS) {
+    logger.critical("Pastikan semua variabel di file .env sudah benar.");
     process.exit(1);
 }
 
 const uploadsCount = parseInt(UPLOADS_TO_RUN, 10) || 1;
 const delayMilliseconds = parseInt(DELAY_MS, 10) || 5000;
-const storageFee = ethers.parseEther(STORAGE_FEE_IN_ETHER);
 
 // --- Setup Provider & Wallet ---
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// Direktori sementara
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const GENERATED_DIR = path.join(__dirname, 'generated-files');
-
 // --- Fungsi-fungsi Utama ---
-async function ensureDirectoryExists(dirPath) {
-    try { await fs.access(dirPath); } catch (error) {
-        if (error.code === 'ENOENT') { await fs.mkdir(dirPath); } else { throw error; }
-    }
-}
-
 async function fetchRandomImage() {
     logger.loading('Fetching random image...');
     try {
@@ -70,31 +58,45 @@ async function fetchRandomImage() {
     }
 }
 
-async function uploadFileManually(imageBuffer) {
-    logger.loading('Preparing file for manual upload...');
-    const root = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
-    const size = imageBuffer.length;
-
-    logger.loading(`Uploading file segment for root ${root}...`);
+/**
+ * Logika upload dan transaksi disesuaikan persis seperti script Anda yang berhasil.
+ */
+async function uploadAndSubmitTransaction(imageBuffer) {
+    // 1. Hitung root hash dari file HANYA untuk diupload ke indexer
+    const rootForIndexer = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
+    logger.loading(`Uploading file segment for root ${rootForIndexer}...`);
+    
     await axios.post(`${INDEXER_URL}/file/segment`, {
-        root: root,
+        root: rootForIndexer,
         index: 0,
         data: Buffer.from(imageBuffer).toString('base64'),
-        proof: { siblings: [root], path: [] }
+        proof: { siblings: [rootForIndexer], path: [] }
     }, { headers: { 'content-type': 'application/json' } });
     logger.info('File segment uploaded to indexer.');
 
-    // ==================================================================
-    // **PERUBAHAN KUNCI DI SINI:** Mengganti uint64 menjadi uint256
-    const iface = new ethers.Interface([`function store(bytes32 _root, uint256 _dataSize)`]);
-    // ==================================================================
-    const data = iface.encodeFunctionData("store", [root, BigInt(size)]);
-    
-    logger.loading('Sending transaction with correct signature...');
+    // 2. Membuat calldata secara manual, persis seperti script Anda
+    logger.loading('Creating transaction data manually...');
+    const METHOD_ID = '0xef3e12dc';
+    const contentHash = crypto.randomBytes(32); // Menggunakan hash acak untuk transaksi
+
+    const data = ethers.concat([
+        Buffer.from(METHOD_ID.slice(2), 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000020', 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000014', 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000060', 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000080', 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000000', 'hex'),
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000001', 'hex'),
+        contentHash,
+        Buffer.from('0000000000000000000000000000000000000000000000000000000000000000', 'hex')
+    ]);
+
+    // 3. Mengirim transaksi dengan parameter yang sudah terbukti
+    logger.loading('Sending transaction...');
     const tx = await wallet.sendTransaction({
         to: CONTRACT_ADDRESS,
         data: data,
-        value: storageFee
+        value: ethers.parseEther('0.000839233398436224') // Nilai di-hardcode seperti script Anda
     });
 
     const txLink = `${EXPLORER_URL}${tx.hash}`;
@@ -109,28 +111,21 @@ async function uploadFileManually(imageBuffer) {
     }
 
     logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
-    logger.info(`File uploaded successfully! Root hash: ${root}`);
+    logger.info(`Submission successful! (Note: Transaction hash is proof, not file hash)`);
     return receipt;
 }
 
 async function main() {
     logger.banner();
     try {
-        await ensureDirectoryExists(GENERATED_DIR);
         logger.loading(`Checking connection to ${RPC_URL}...`);
         const network = await provider.getNetwork();
         logger.info(`Connected to network: chainId ${network.chainId}`);
         logger.loading(`Checking balance for wallet: ${wallet.address}`);
         const balance = await provider.getBalance(wallet.address);
         logger.info(`Wallet balance: ${ethers.formatEther(balance)} OG`);
-        
-        if (balance < storageFee) {
-            logger.critical(`Saldo tidak cukup (${ethers.formatEther(balance)} OG). Dibutuhkan > ${ethers.formatEther(storageFee)} OG untuk biaya.`);
-            return;
-        }
 
         logger.section(`Starting ${uploadsCount} upload(s) for wallet ${wallet.address}`);
-
         let successful = 0;
         let failed = 0;
 
@@ -138,9 +133,9 @@ async function main() {
             logger.process(`Upload ${i}/${uploadsCount}`);
             try {
                 const imageBuffer = await fetchRandomImage();
-                await uploadFileManually(imageBuffer);
+                await uploadAndSubmitTransaction(imageBuffer);
                 successful++;
-                logger.info(`Upload ${i} completed successfully.`);
+                logger.success(`Upload ${i} completed successfully.`);
             } catch (error) {
                 failed++;
                 logger.error(`Upload ${i} failed: ${error.message}`);
@@ -154,8 +149,8 @@ async function main() {
 
         logger.section('Upload Summary');
         logger.info(`Total tasks: ${uploadsCount}`);
-        logger.info(`Successful: ${successful}`);
-        logger.error(`Failed: ${failed}`);
+        logger.success(`Successful: ${successful}`);
+        if(failed > 0) logger.error(`Failed: ${failed}`);
 
     } catch (error) {
         logger.critical(`A critical error occurred: ${error.message}`);
