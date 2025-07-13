@@ -18,11 +18,12 @@ const logger = {
   info: (msg) => console.log(`${colors.green}[✓] ${msg}${colors.reset}`),
   warn: (msg) => console.log(`${colors.yellow}[⚠] ${msg}${colors.reset}`),
   error: (msg) => console.log(`${colors.red}[✗] ${msg}${colors.reset}`),
+  success: (msg) => console.log(`${colors.green}[✅] ${msg}${colors.reset}`),
   loading: (msg) => console.log(`${colors.cyan}[⟳] ${msg}${colors.reset}`),
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Final Working Version) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Uploader (The Real Final Version) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
@@ -59,10 +60,10 @@ async function fetchRandomImage() {
 }
 
 /**
- * Logika upload dan transaksi disesuaikan persis seperti script Anda yang berhasil.
+ * Logika disesuaikan dengan penanganan gas eksplisit dari script Anda.
  */
 async function uploadAndSubmitTransaction(imageBuffer) {
-    // 1. Hitung root hash dari file HANYA untuk diupload ke indexer
+    // 1. Upload file ke storage node
     const rootForIndexer = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
     logger.loading(`Uploading file segment for root ${rootForIndexer}...`);
     
@@ -74,10 +75,9 @@ async function uploadAndSubmitTransaction(imageBuffer) {
     }, { headers: { 'content-type': 'application/json' } });
     logger.info('File segment uploaded to indexer.');
 
-    // 2. Membuat calldata secara manual, persis seperti script Anda
-    logger.loading('Creating transaction data manually...');
+    // 2. Membuat calldata secara manual
     const METHOD_ID = '0xef3e12dc';
-    const contentHash = crypto.randomBytes(32); // Menggunakan hash acak untuk transaksi
+    const contentHash = crypto.randomBytes(32);
 
     const data = ethers.concat([
         Buffer.from(METHOD_ID.slice(2), 'hex'),
@@ -91,14 +91,37 @@ async function uploadAndSubmitTransaction(imageBuffer) {
         Buffer.from('0000000000000000000000000000000000000000000000000000000000000000', 'hex')
     ]);
 
-    // 3. Mengirim transaksi dengan parameter yang sudah terbukti
-    logger.loading('Sending transaction...');
-    const tx = await wallet.sendTransaction({
-        to: CONTRACT_ADDRESS,
-        data: data,
-        value: ethers.parseEther('0.000839233398436224') // Nilai di-hardcode seperti script Anda
-    });
+    // 3. Menyiapkan parameter transaksi dengan gas eksplisit
+    const value = ethers.parseEther('0.000839233398436224');
+    const gasPrice = ethers.parseUnits('1.1', 'gwei'); // Menggunakan gas price yang sedikit lebih tinggi untuk keamanan
+    let gasLimit;
 
+    logger.loading('Estimating gas...');
+    try {
+        const gasEstimate = await provider.estimateGas({
+            to: CONTRACT_ADDRESS,
+            data,
+            from: wallet.address,
+            value
+        });
+        gasLimit = (BigInt(gasEstimate) * 15n) / 10n; // Tambah buffer 50%
+        logger.info(`Gas limit estimated: ${gasLimit}`);
+    } catch (error) {
+        gasLimit = 300000n; // Fallback jika estimasi gagal
+        logger.warn(`Gas estimation failed, using default: ${gasLimit}. Error: ${error.message}`);
+    }
+
+    // 4. Mengirim transaksi
+    logger.loading('Sending transaction with explicit gas parameters...');
+    const txParams = {
+        to: CONTRACT_ADDRESS,
+        data,
+        value,
+        gasPrice,
+        gasLimit
+    };
+    
+    const tx = await wallet.sendTransaction(txParams);
     const txLink = `${EXPLORER_URL}${tx.hash}`;
     logger.info(`Transaction sent: ${tx.hash}`);
     logger.info(`Explorer: ${txLink}`);
@@ -107,20 +130,17 @@ async function uploadAndSubmitTransaction(imageBuffer) {
     const receipt = await tx.wait();
 
     if (receipt.status !== 1) {
-        throw new Error(`Transaction failed with status ${receipt.status}`);
+        throw new Error(`Transaction failed with status 0`);
     }
 
-    logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
-    logger.info(`Submission successful! (Note: Transaction hash is proof, not file hash)`);
+    logger.success(`Transaction confirmed in block ${receipt.blockNumber}`);
+    logger.success(`Submission successful!`);
     return receipt;
 }
 
 async function main() {
     logger.banner();
     try {
-        logger.loading(`Checking connection to ${RPC_URL}...`);
-        const network = await provider.getNetwork();
-        logger.info(`Connected to network: chainId ${network.chainId}`);
         logger.loading(`Checking balance for wallet: ${wallet.address}`);
         const balance = await provider.getBalance(wallet.address);
         logger.info(`Wallet balance: ${ethers.formatEther(balance)} OG`);
