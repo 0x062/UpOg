@@ -22,34 +22,34 @@ const logger = {
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Manual Fallback v5) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Manual Fallback v6) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
 const {
     PRIVATE_KEY, RPC_URL, INDEXER_URL, CONTRACT_ADDRESS,
-    UPLOADS_TO_RUN, DELAY_MS, EXPLORER_URL
+    UPLOADS_TO_RUN, DELAY_MS, EXPLORER_URL, STORAGE_FEE_IN_ETHER
 } = process.env;
 
-if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS) {
-    logger.critical("Pastikan semua variabel (termasuk CONTRACT_ADDRESS) ada di file .env");
+if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS || !STORAGE_FEE_IN_ETHER) {
+    logger.critical("Pastikan semua variabel (termasuk CONTRACT_ADDRESS & STORAGE_FEE_IN_ETHER) ada di file .env");
     process.exit(1);
 }
 
 const uploadsCount = parseInt(UPLOADS_TO_RUN, 10) || 1;
 const delayMilliseconds = parseInt(DELAY_MS, 10) || 5000;
+const storageFee = ethers.parseEther(STORAGE_FEE_IN_ETHER); // Konversi biaya ke wei
 
 // --- Setup Provider & Wallet ---
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// Membuat direktori untuk file sementara
+// Direktori sementara
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const GENERATED_DIR = path.join(__dirname, 'generated-files');
 
 // --- Fungsi-fungsi Utama ---
-
 async function ensureDirectoryExists(dirPath) {
     try { await fs.access(dirPath); } catch (error) {
         if (error.code === 'ENOENT') { await fs.mkdir(dirPath); } else { throw error; }
@@ -71,14 +71,13 @@ async function fetchRandomImage() {
 }
 
 /**
- * Upload file menggunakan metode manual (axios + ethers)
+ * **PERUBAHAN DI SINI:** Menambahkan `value` ke dalam transaksi
  */
 async function uploadFileManually(imageBuffer) {
     logger.loading('Preparing file for manual upload...');
     const root = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
     const size = imageBuffer.length;
 
-    // 1. Upload file ke storage node via indexer (axios)
     logger.loading(`Uploading file segment for root ${root}...`);
     await axios.post(`${INDEXER_URL}/file/segment`, {
         root: root,
@@ -88,16 +87,14 @@ async function uploadFileManually(imageBuffer) {
     }, { headers: { 'content-type': 'application/json' } });
     logger.info('File segment uploaded to indexer.');
 
-    // 2. Kirim transaksi ke smart contract (ethers)
     const iface = new ethers.Interface([`function store(bytes32 _root, uint64 _dataSize)`]);
     const data = iface.encodeFunctionData("store", [root, BigInt(size)]);
     
-    logger.loading('Estimating gas and sending transaction...');
+    logger.loading('Estimating gas and sending transaction with storage fee...');
     const tx = await wallet.sendTransaction({
         to: CONTRACT_ADDRESS,
         data: data,
-        // Anda bisa menambahkan value jika diperlukan, tapi seringkali gas saja cukup
-        // value: ethers.parseEther('0.00084') 
+        value: storageFee // **INI PERUBAHANNYA**
     });
 
     const txLink = `${EXPLORER_URL}${tx.hash}`;
@@ -127,6 +124,11 @@ async function main() {
         const balance = await provider.getBalance(wallet.address);
         logger.info(`Wallet balance: ${ethers.formatEther(balance)} OG`);
         
+        if (balance < storageFee) {
+            logger.critical(`Saldo tidak cukup (${ethers.formatEther(balance)} OG). Dibutuhkan > ${ethers.formatEther(storageFee)} OG untuk biaya.`);
+            return;
+        }
+
         logger.section(`Starting ${uploadsCount} upload(s) for wallet ${wallet.address}`);
 
         let successful = 0;
@@ -136,12 +138,12 @@ async function main() {
             logger.process(`Upload ${i}/${uploadsCount}`);
             try {
                 const imageBuffer = await fetchRandomImage();
-                await uploadFileManually(imageBuffer); // Memanggil fungsi manual
+                await uploadFileManually(imageBuffer);
                 successful++;
                 logger.info(`Upload ${i} completed successfully.`);
             } catch (error) {
                 failed++;
-                logger.error(`Upload ${i} failed: ${error.response ? JSON.stringify(error.response.data) : error.message}`);
+                logger.error(`Upload ${i} failed: ${error.message}`);
             }
 
             if (i < uploadsCount) {
