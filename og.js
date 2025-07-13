@@ -22,7 +22,7 @@ const logger = {
   process: (msg) => console.log(`\n${colors.white}[➤] ${msg}${colors.reset}`),
   critical: (msg) => console.log(`${colors.red}[❌] ${msg}${colors.reset}`),
   section: (msg) => console.log(`\n${colors.cyan}${'='.repeat(50)}\n${msg}\n${'='.repeat(50)}${colors.reset}\n`),
-  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Manual Fallback v6) ---${colors.reset}\n`),
+  banner: () => console.log(`${colors.cyan}--- 0G Uploader (Final Version) ---${colors.reset}\n`),
 };
 
 // --- Memuat Konfigurasi dari .env ---
@@ -38,7 +38,7 @@ if (!PRIVATE_KEY || !RPC_URL || !INDEXER_URL || !CONTRACT_ADDRESS || !STORAGE_FE
 
 const uploadsCount = parseInt(UPLOADS_TO_RUN, 10) || 1;
 const delayMilliseconds = parseInt(DELAY_MS, 10) || 5000;
-const storageFee = ethers.parseEther(STORAGE_FEE_IN_ETHER); // Konversi biaya ke wei
+const storageFee = ethers.parseEther(STORAGE_FEE_IN_ETHER);
 
 // --- Setup Provider & Wallet ---
 const provider = new ethers.JsonRpcProvider(RPC_URL);
@@ -70,9 +70,6 @@ async function fetchRandomImage() {
     }
 }
 
-/**
- * **PERUBAHAN DI SINI:** Menambahkan `value` ke dalam transaksi
- */
 async function uploadFileManually(imageBuffer) {
     logger.loading('Preparing file for manual upload...');
     const root = '0x' + crypto.createHash('sha256').update(imageBuffer).digest('hex');
@@ -87,14 +84,17 @@ async function uploadFileManually(imageBuffer) {
     }, { headers: { 'content-type': 'application/json' } });
     logger.info('File segment uploaded to indexer.');
 
-    const iface = new ethers.Interface([`function store(bytes32 _root, uint64 _dataSize)`]);
+    // ==================================================================
+    // **PERUBAHAN KUNCI DI SINI:** Mengganti uint64 menjadi uint256
+    const iface = new ethers.Interface([`function store(bytes32 _root, uint256 _dataSize)`]);
+    // ==================================================================
     const data = iface.encodeFunctionData("store", [root, BigInt(size)]);
     
-    logger.loading('Estimating gas and sending transaction with storage fee...');
+    logger.loading('Sending transaction with correct signature...');
     const tx = await wallet.sendTransaction({
         to: CONTRACT_ADDRESS,
         data: data,
-        value: storageFee // **INI PERUBAHANNYA**
+        value: storageFee
     });
 
     const txLink = `${EXPLORER_URL}${tx.hash}`;
